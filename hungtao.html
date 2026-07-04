@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hoa Quả Nổi Loạn - Phiên Bản Duy Đông</title>
+    <style>
+        * { box-sizing: border-box; user-select: none; }
+        body {
+            margin: 0; padding: 0; background: #0b0f19; color: #ffffff;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex; justify-content: center; align-items: center;
+            min-height: 100vh; overflow: hidden;
+        }
+        .game-container { position: relative; box-shadow: 0 20px 50px rgba(0,0,0,0.8); border-radius: 16px; overflow: hidden; border: 4px solid #1e293b; }
+        /* ẨN CON TRỎ CHUỘT MẶC ĐỊNH HỆ THỐNG ĐỂ VẼ CON TRỎ CHUỘT RIÊNG TRONG GAME */
+        canvas { display: block; background: #111827; cursor: none; }
+        .game-guide {
+            position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%);
+            background: rgba(0,0,0,0.6); padding: 5px 15px; border-radius: 20px;
+            font-size: 12px; pointer-events: none; color: #9ca3af; text-align: center; width: 85%;
+        }
+    </style>
+</head>
+<body>
+
+<div class="game-container">
+    <canvas id="canvas" width="500" height="650"></canvas>
+    <div class="game-guide">Chuột/Mũi tên: Di chuyển | P: Tạm dừng | S: Vào Cài đặt đổi Giỏ & Độ khó</div>
+</div>
+
+<script>
+// ============================================================================
+// 1. KHỞI TẠO HỆ THỐNG TOÀN CỤC
+// ============================================================================
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+
+const AudioContext = window.AudioContext || window.webkitAudioContext;
+const audioCtx = AudioContext ? new AudioContext() : null;
+
+function playSound(type) {
+    if (!audioCtx) return;
+    try {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.connect(gain); gain.connect(audioCtx.destination);
+        if (type === "catch") {
+            osc.frequency.setValueAtTime(523.25, audioCtx.currentTime);
+            osc.frequency.setValueAtTime(659.25, audioCtx.currentTime + 0.1);
+            gain.gain.setValueAtTime(0.08, audioCtx.currentTime);
+            osc.start(); osc.stop(audioCtx.currentTime + 0.15);
+        } else if (type === "bomb") {
+            osc.type = "sawtooth"; osc.frequency.setValueAtTime(120, audioCtx.currentTime);
+            gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+            osc.start(); osc.stop(audioCtx.currentTime + 0.2);
+        } else if (type === "levelup") {
+            osc.frequency.setValueAtTime(587.33, audioCtx.currentTime);
+            osc.frequency.setValueAtTime(698.46, audioCtx.currentTime + 0.1);
+            osc.frequency.setValueAtTime(880.00, audioCtx.currentTime + 0.2);
+            gain.gain.setValueAtTime(0.15, audioCtx.currentTime);
+            osc.start(); osc.stop(audioCtx.currentTime + 0.4);
+        }
+    } catch(e) {}
+}
+
+// Trạng thái cấu hình Game
+let state = "INTRO"; 
+let score = 0; let lives = 3; let maxLives = 5;
+let currentLevel = 1; let combo = 0; let comboTimer = 0;
+let isReverseControl = false; let reverseTimer = 0;
+let levelUpFlash = 0;
+
+let difficulty = "NORMAL"; 
+let currentBasketSkin = "DEFAULT"; 
+
+const difficultySettings = {
+    EASY:   { label: "DỄ",      speedMod: 0.75, spawnMod: 0.8,  startLives: 5, bombChanceMod: 0.5 },
+    NORMAL: { label: "TRUNG BÌNH", speedMod: 1.0,  spawnMod: 1.0,  startLives: 3, bombChanceMod: 1.0 },
+    HARD:   { label: "KHÓ",     speedMod: 1.35, spawnMod: 1.3,  startLives: 2, bombChanceMod: 1.7 }
+};
+
+const basketSkins = {
+    DEFAULT:  { label: "Giỏ Gỗ Cổ Điển", color: "#b45309", width: 90,  height: 20, style: "wood" },
+    NEON:     { label: "Khay Neon Công Nghệ", color: "#06b6d4", width: 95,  height: 16, style: "neon" },
+    GOLDEN:   { label: "Thùng Vàng Hoàng Gia", color: "#eab308", width: 85,  height: 22, style: "gold" },
+    MAGNET:   { label: "Nam Châm Điện Từ", color: "#ef4444", width: 100, height: 18, style: "magnet" }
+};
+
+const keys = {}; 
+let mouseX = canvas.width / 2; 
+let mouseY = canvas.height / 2; // Lưu trữ thêm tọa độ Y để vẽ chuột tùy chỉnh
+let items = []; let particles = []; let backgroundStars = []; let floatingTexts = [];
+
+for (let i = 0; i < 30; i++) {
+    backgroundStars.push({
+        x: Math.random() * canvas.width, y: Math.random() * canvas.height,
+        size: Math.random() * 2 + 1, speed: Math.random() * 0.4 + 0.1
+    });
+}
+
+const maps = {
+    1: { name: "Ải 1: Vườn Táo Tân Thủ", targetScore: 20, baseSpeed: 3.2, spawnRate: 0.02, bgGradient: ["#1e3c72", "#2a5298"], pool: ["APPLE", "APPLE", "GOLDEN", "BOMB"] },
+    2: { name: "Ải 2: Rừng Thưa Gió Độc", targetScore: 50, baseSpeed: 4.4, spawnRate: 0.025, bgGradient: ["#134e5e", "#c9c64e"], pool: ["APPLE", "GOLDEN", "BOMB", "POISON"] },
+    3: { name: "Ải 3: Đỉnh Núi Lửa", targetScore: 100, baseSpeed: 5.8, spawnRate: 0.03, bgGradient: ["#800000", "#990000"], pool: ["APPLE", "GOLDEN", "BOMB", "BOMB", "HEART"] },
+    4: { name: "Ải 4: Thung Lũng Bóng Đêm", targetScore: 160, baseSpeed: 7.0, spawnRate: 0.035, bgGradient: ["#0f0c20", "#24243e"], pool: ["APPLE", "GOLDEN", "BOMB", "POISON", "POISON"] },
+    5: { name: "Ải Cuối: Thiên Đường Trái Cây", targetScore: 230, baseSpeed: 8.8, spawnRate: 0.045, bgGradient: ["#4c0519", "#9013fe"], pool: ["APPLE", "GOLDEN", "BOMB", "HEART", "POISON"] }
+};
+
+const basket = { x: 200, y: 570, width: 90, height: 20, speed: 8 };
+const itemTypes = {
+    APPLE:  { name: "Táo Đỏ",   color: "#ef4444", radius: 10, effect: "score",  val: 1 },
+    GOLDEN: { name: "Táo Vàng", color: "#fbbf24", radius: 9,  effect: "score",  val: 3 },
+    BOMB:   { name: "Bom Độc",  color: "#1f2937", radius: 13, effect: "bomb",   val: 1 },
+    POISON: { name: "Thuốc Độc",color: "#a855f7", radius: 11, effect: "poison", val: 0 },
+    HEART:  { name: "Trái Tim", color: "#ec4899", radius: 10, effect: "heart",  val: 1 }
+};
+
+// ============================================================================
+// 2. HỆ THỐNG XỬ LÝ SỰ KIỆN TƯƠNG TÁC
+// ============================================================================
+window.addEventListener("keydown", function(e) {
+    keys[e.code] = true;
+    if (e.code === "KeyP" && (state === "PLAYING" || state === "PAUSED")) state = state === "PLAYING" ? "PAUSED" : "PLAYING";
+    if (e.code === "KeyS" && (state === "PLAYING" || state === "MENU")) { state = "SETTINGS"; }
+    else if (e.code === "KeyS" && state === "SETTINGS") { state = "PLAYING"; }
+});
+
+window.addEventListener("keyup", function(e) { keys[e.code] = false; });
+
+canvas.addEventListener("mousemove", function(e) {
+    const rect = canvas.getBoundingClientRect();
+    mouseX = e.clientX - rect.left;
+    mouseY = e.clientY - rect.top; // Cập nhật tọa độ Y liên tục
+});
+
+canvas.addEventListener("click", function(e) {
+    const rect = canvas.getBoundingClientRect();
+    const clickX = e.clientX - rect.left;
+    const clickY = e.clientY - rect.top;
+
+    if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
+
+    if (state === "INTRO") {
+        if (clickX >= 150 && clickX <= 350 && clickY >= 530 && clickY <= 580) {
+            state = "MENU"; playSound("catch");
+        }
+    }
+    else if (state === "MENU" || state === "GAMEOVER" || state === "VICTORY") {
+        if (clickX >= 150 && clickX <= 350 && clickY >= 450 && clickY <= 500) {
+            resetGameSession();
+        }
+        if (clickX >= 150 && clickX <= 350 && clickY >= 520 && clickY <= 570) {
+            state = "SETTINGS";
+        }
+    }
+    else if (state === "SETTINGS") {
+        if (clickY >= 210 && clickY <= 250) {
+            if (clickX >= 40 && clickX <= 160) { difficulty = "EASY"; playSound("catch"); }
+            if (clickX >= 190 && clickX <= 310) { difficulty = "NORMAL"; playSound("catch"); }
+            if (clickX >= 340 && clickX <= 460) { difficulty = "HARD"; playSound("catch"); }
+        }
+        if (clickX >= 40 && clickX <= 460) {
+            if (clickY >= 340 && clickY <= 380) { currentBasketSkin = "DEFAULT"; playSound("levelup"); }
+            if (clickY >= 395 && clickY <= 435) { currentBasketSkin = "NEON"; playSound("levelup"); }
+            if (clickY >= 450 && clickY <= 490) { currentBasketSkin = "GOLDEN"; playSound("levelup"); }
+            if (clickY >= 505 && clickY <= 545) { currentBasketSkin = "MAGNET"; playSound("levelup"); }
+        }
+        applyBasketSkin();
+
+        if (clickX >= 170 && clickX <= 330 && clickY >= 575 && clickY <= 620) {
+            state = "MENU";
+        }
+    }
+});
+
+function applyBasketSkin() {
+    const skin = basketSkins[currentBasketSkin];
+    basket.width = skin.width;
+    basket.height = skin.height;
+}
+
+function resetGameSession() {
+    score = 0; currentLevel = 1; combo = 0; comboTimer = 0; isReverseControl = false; levelUpFlash = 0;
+    items = []; particles = []; floatingTexts = [];
+    lives = difficultySettings[difficulty].startLives;
+    maxLives = difficulty === "EASY" ? 6 : 5;
+    applyBasketSkin();
+    state = "PLAYING";
+    playSound("levelup");
+}
+
+// ============================================================================
+// 3. LOGIC VẬN HÀNH TRÒ CHƠI (UPDATE)
+// ============================================================================
+function triggerLevelUpEffects() {
+    levelUpFlash = 45; 
+    items = [];
+    for (let i = 0; i < 40; i++) {
+        particles.push({
+            x: Math.random() * canvas.width, y: Math.random() * (canvas.height - 200),
+            vx: (Math.random() - 0.5) * 8, vy: (Math.random() - 0.5) * 8,
+            radius: Math.random() * 4 + 2,
+            color: `hsl(${Math.random() * 360}, 100%, 60%)`, alpha: 1, decay: 0.015
+        });
+    }
+    playSound("levelup");
+}
+
+function spawnItem() {
+    const levelConfig = maps[currentLevel];
+    const diff = difficultySettings[difficulty];
+    let randomIndex = Math.floor(Math.random() * levelConfig.pool.length);
+    let chosenTypeKey = levelConfig.pool[randomIndex];
+    
+    if (chosenTypeKey !== "BOMB" && Math.random() < (diff.bombChanceMod - 1) * 0.25) {
+        if (levelConfig.pool.includes("BOMB")) chosenTypeKey = "BOMB";
+    }
+
+    const proto = itemTypes[chosenTypeKey];
+    items.push({
+        x: Math.random() * (canvas.width - 40) + 20, y: -30,
+        color: proto.color, radius: proto.radius, effect: proto.effect, val: proto.val,
+        speed: (Math.random() * 1.5 + levelConfig.baseSpeed) * diff.speedMod, pulse: 0
+    });
+}
+
+function addParticleEffect(x, y, color) {
+    for (let i = 0; i < 10; i++) {
+        particles.push({
+            x: x, y: y, vx: (Math.random() - 0.5) * 5, vy: (Math.random() - 0.5) * 5,
+            radius: Math.random() * 3 + 1, color: color, alpha: 1, decay: 0.025
+        });
+    }
+}
+
+function addFloatingText(x, y, text, color) {
+    floatingTexts.push({ x: x, y: y, text: text, color: color, alpha: 1, speedY: -1 });
+}
+
+function update() {
+    backgroundStars.forEach(star => {
+        star.y += star.speed;
+        if (star.y > canvas.height) { star.y = 0; star.x = Math.random() * canvas.width; }
+    });
+
+    if (levelUpFlash > 0) levelUpFlash--;
+
+    if (state !== "PLAYING") return;
+
+    if (isReverseControl) { reverseTimer--; if (reverseTimer <= 0) isReverseControl = false; }
+    if (combo > 0) { comboTimer--; if (comboTimer <= 0) combo = 0; }
+
+    let moveDir = 0;
+    if (keys["ArrowLeft"] || keys["KeyA"]) moveDir = -1;
+    if (keys["ArrowRight"] || keys["KeyD"]) moveDir = 1;
+
+    if (moveDir === 0) {
+        let targetX = mouseX - basket.width / 2;
+        if (isReverseControl) targetX = (canvas.width - mouseX) - basket.width / 2;
+        basket.x += (targetX - basket.x) * 0.25;
+    } else {
+        if (isReverseControl) moveDir *= -1;
+        basket.x += moveDir * basket.speed;
+    }
+
+    if (basket.x < 0) basket.x = 0;
+    if (basket.x > canvas.width - basket.width) basket.x = canvas.width - basket.width;
+
+    if (Math.random() < maps[currentLevel].spawnRate * difficultySettings[difficulty].spawnMod) spawnItem();
+
+    for (let i = items.length - 1; i >= 0; i--) {
+        let item = items[i]; item.y += item.speed; item.pulse += 0.08;
+
+        let collides = (item.y + item.radius >= basket.y) && (item.y - item.radius <= basket.y + basket.height) &&
+                       (item.x + item.radius >= basket.x) && (item.x - item.radius <= basket.x + basket.width);
+
+        if (collides) {
+            addParticleEffect(item.x, item.y, item.color);
+            if (item.effect === "score") {
+                combo++; comboTimer = 120;
+                let bonus = item.val;
+                if (combo >= 12) bonus *= 3; else if (combo >= 5) bonus *= 2;
+                score += bonus; addFloatingText(item.x, basket.y - 10, `+${bonus} Điểm ${combo > 5 ? 'Combo!' : ''}`, item.color);
+                playSound("catch");
+            } else if (item.effect === "bomb") {
+                lives--; combo = 0; addFloatingText(item.x, basket.y - 10, "-1 Mạng (Bom)", "#ef4444"); playSound("bomb");
+                if (lives <= 0) state = "GAMEOVER";
+            } else if (item.effect === "poison") {
+                isReverseControl = true; reverseTimer = 200;
+                addFloatingText(item.x, basket.y - 10, "Đảo Hướng Điều Khiển!", "#a855f7"); playSound("bomb");
+            } else if (item.effect === "heart") {
+                if (lives < maxLives) { lives++; addFloatingText(item.x, basket.y - 10, "+1 Tim", "#ec4899"); playSound("levelup"); }
+            }
+            items.splice(i, 1);
+
+            if (score >= maps[currentLevel].targetScore) {
+                if (maps[currentLevel + 1]) { 
+                    currentLevel++; 
+                    triggerLevelUpEffects();
+                } else state = "VICTORY";
+            }
+            continue;
+        }
+
+        if (item.y - item.radius > canvas.height) {
+            if (item.effect === "score") {
+                combo = 0;
+                if (difficulty === "HARD") { lives--; if (lives <= 0) state = "GAMEOVER"; }
+            }
+            items.splice(i, 1);
+        }
+    }
+
+    for (let i = particles.length - 1; i >= 0; i--) {
+        let p = particles[i]; p.x += p.vx; p.y += p.vy; p.alpha -= p.decay; if (p.alpha <= 0) particles.splice(i, 1);
+    }
+    for (let i = floatingTexts.length - 1; i >= 0; i--) {
+        let ft = floatingTexts[i]; ft.y += ft.speedY; ft.alpha -= 0.02; if (ft.alpha <= 0) floatingTexts.splice(i, 1);
+    }
+}
+
+// ============================================================================
+// 4. HỆ THỐNG ĐỒ HỌA GIAO DIỆN (DRAW)
+// ============================================================================
+function drawCustomMouse() {
+    // Hàm tự vẽ một con trỏ chuột tùy chỉnh đẹp mắt hình mũi tên neon phát sáng
+    ctx.save();
+    ctx.translate(mouseX, mouseY);
+    ctx.shadowBlur = 8;
+    ctx.shadowColor = "#3b82f6";
+    
+    ctx.fillStyle = "#ffffff";
+    ctx.strokeStyle = "#1d4ed8";
+    ctx.lineWidth = 2;
+    
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(0, 17);
+    ctx.lineTo(4, 13);
+    ctx.lineTo(9, 21);
+    ctx.lineTo(12, 19);
+    ctx.lineTo(7, 12);
+    ctx.lineTo(12, 12);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+}
+
+function draw() {
+    const currentMap = maps[currentLevel];
+    let bgGrad = ctx.createLinearGradient(0, 0, 0, canvas.height);
+    bgGrad.addColorStop(0, currentMap.bgGradient[0]); bgGrad.addColorStop(1, currentMap.bgGradient[1]);
+    ctx.fillStyle = bgGrad; ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    ctx.fillStyle = "rgba(255, 255, 255, 0.5)";
+    backgroundStars.forEach(star => ctx.fillRect(star.x, star.y, star.size, star.size));
+
+    if (levelUpFlash > 0) {
+        ctx.fillStyle = `rgba(251, 191, 36, ${levelUpFlash / 45 * 0.4})`;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.save();
+        ctx.textAlign = "center"; ctx.fillStyle = "#ffffff"; ctx.font = "bold 24px 'Segoe UI'";
+        ctx.fillText("ẢI MỚI ĐÃ MỞ RỘNG!", canvas.width / 2, canvas.height / 2);
+        ctx.restore();
+    }
+
+    // Vẽ thiết bị hứng
+    const activeSkin = basketSkins[currentBasketSkin];
+    ctx.save(); ctx.fillStyle = activeSkin.color;
+    if (activeSkin.style === "neon") { ctx.shadowBlur = 15; ctx.shadowColor = activeSkin.color; }
+    ctx.beginPath(); ctx.roundRect(basket.x, basket.y, basket.width, basket.height, 6); ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,0.3)";
+    if (activeSkin.style === "wood") ctx.fillRect(basket.x + 10, basket.y + 4, basket.width - 20, 3);
+    if (activeSkin.style === "gold") ctx.fillRect(basket.x + 4, basket.y + 2, basket.width - 8, basket.height - 4);
+    if (activeSkin.style === "magnet") { ctx.fillStyle = "#ffffff"; ctx.fillRect(basket.x, basket.y, 8, basket.height); ctx.fillRect(basket.x + basket.width - 8, basket.y, 8, basket.height); }
+    ctx.restore();
+
+    // Vẽ vật phẩm trái cây
+    items.forEach(item => {
+        ctx.save(); let scale = 1 + Math.sin(item.pulse) * 0.05;
+        ctx.translate(item.x, item.y); ctx.scale(scale, scale);
+        ctx.beginPath(); ctx.arc(0, 0, item.radius, 0, Math.PI * 2); ctx.fillStyle = item.color; ctx.fill();
+        ctx.fillStyle = "#22c55e"; ctx.fillRect(-1, -item.radius - 2, 2, 4); ctx.restore();
+    });
+
+    particles.forEach(p => {
+        ctx.save(); ctx.globalAlpha = p.alpha; ctx.fillStyle = p.color;
+        ctx.beginPath(); ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+    });
+
+    floatingTexts.forEach(ft => {
+        ctx.save(); ctx.globalAlpha = ft.alpha; ctx.fillStyle = ft.color;
+        ctx.font = "bold 14px 'Segoe UI'"; ctx.textAlign = "center"; ctx.fillText(ft.text, ft.x, ft.y); ctx.restore();
+    });
+
+    // THANH TRẠNG THÁI HUD
+    ctx.fillStyle = "rgba(15, 23, 42, 0.6)"; ctx.fillRect(0, 0, canvas.width, 60);
+    ctx.fillStyle = "#ffffff"; ctx.font = "bold 13px 'Segoe UI'"; ctx.fillText(currentMap.name, 15, 23);
+    ctx.fillStyle = "#9ca3af"; ctx.font = "11px 'Segoe UI'"; ctx.fillText(`Mức độ: ${difficultySettings[difficulty].label} | Dụng cụ: ${activeSkin.label}`, 15, 43);
+
+    ctx.fillStyle = "#fbbf24"; ctx.font = "bold 16px 'Segoe UI'"; ctx.textAlign = "right"; 
+    ctx.fillText(`⭐ ${score} / ${currentMap.targetScore}`, canvas.width - 15, 25);
+    ctx.fillStyle = "#6be6a8"; ctx.font = "11px 'Segoe UI'";
+    ctx.fillText(`Mục tiêu qua ải: ${currentMap.targetScore}đ`, canvas.width - 15, 45);
+    ctx.textAlign = "left";
+
+    ctx.fillStyle = "#9ca3af"; ctx.font = "12px 'Segoe UI'"; ctx.fillText("Mạng: ", 195, 35);
+    for (let h = 0; h < maxLives; h++) {
+        ctx.fillStyle = h < lives ? "#ec4899" : "#374151";
+        ctx.beginPath(); ctx.arc(245 + h * 15, 31, 5, 0, Math.PI * 2); ctx.fill();
+    }
+
+    if (combo > 0) {
+        ctx.fillStyle = combo >= 12 ? "#ef4444" : "#3b82f6";
+        ctx.fillRect(195, 48, 100 * (comboTimer / 120), 4);
+    }
+
+    if (state === "INTRO") drawIntroScreen();
+    else if (state === "MENU") drawMenuScreen();
+    else if (state === "SETTINGS") drawSettingsScreen();
+    else if (state === "PAUSED") drawOverlay("ĐANG TẠM DỪNG", "Trò chơi đóng băng", "Nhấn phím 'P' để tiếp tục chơi", "#6b7280");
+    else if (state === "GAMEOVER") drawOverlay("THẤT BẠI RỒI", "Bạn đã hết mạng sống", "Nhấn vào nút Cài Đặt hoặc click để thử lại", "#ef4444");
+    else if (state === "VICTORY") drawOverlay("CHIẾN THẮNG TUYỆT ĐỐI", "Bạn đã hoàn thành mọi thử thách!", "Click chuột để quay lại từ đầu", "#10b981");
+
+    // LUÔN VẼ CON TRỎ CHUỘT TÙY CHỈNH LÊN TRÊN CÙNG
+    drawCustomMouse();
+}
+
+function drawOverlay(title, subtitle, footer, accentColor) {
+    ctx.fillStyle = "rgba(10, 15, 30, 0.92)"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.textAlign = "center"; ctx.fillStyle = accentColor; ctx.font = "bold 34px 'Segoe UI'"; ctx.fillText(title, canvas.width / 2, canvas.height / 2 - 40);
+    ctx.fillStyle = "#ffffff"; ctx.font = "16px 'Segoe UI'"; ctx.fillText(subtitle, canvas.width / 2, canvas.height / 2);
+    ctx.fillStyle = "#9ca3af"; ctx.font = "13px 'Segoe UI'"; ctx.fillText(footer, canvas.width / 2, canvas.height / 2 + 50); ctx.textAlign = "left";
+}
+
+function drawIntroScreen() {
+    ctx.fillStyle = "rgba(10, 15, 30, 0.97)"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#fbbf24"; ctx.font = "bold 32px 'Segoe UI'"; ctx.fillText("GAME DUY ĐÔNG", canvas.width / 2, 75);
+    ctx.fillStyle = "#ffffff"; ctx.font = "bold 18px 'Segoe UI'"; ctx.fillText("BẢNG GIỚI THIỆU CHỨC NĂNG", canvas.width / 2, 125);
+    ctx.strokeStyle = "rgba(255,255,255,0.2)"; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(50, 145); ctx.lineTo(450, 145); ctx.stroke();
+
+    let currentY = 185;
+    const rules = [
+        { key: "Chuột / ◄ ►", desc: "Di chuyển thanh hứng trái hoặc phải." },
+        { key: "Phím [ S ]", desc: "Mở Cài đặt đổi độ khó & đổi loại giỏ." },
+        { key: "Phím [ P ]", desc: "Tạm dừng hoặc tiếp tục màn chơi." },
+        { key: "Mức độ chơi", desc: "Có 3 cấp tùy chỉnh: DỄ - VỪA - KHÓ." },
+        { key: "Đổi loại hứng", desc: "Đổi giao diện giỏ hoàn toàn miễn phí." },
+        { key: "Qua ải mới", desc: "Đạt đủ điểm yêu cầu để mở hiệu ứng cấp mới." }
+    ];
+
+    rules.forEach(r => {
+        ctx.textAlign = "right"; ctx.fillStyle = "#3b82f6"; ctx.font = "bold 14px 'Segoe UI'";
+        ctx.fillText(r.key + " :  ", 160, currentY);
+        ctx.textAlign = "left"; ctx.fillStyle = "#e2e8f0"; ctx.font = "14px 'Segoe UI'";
+        ctx.fillText(r.desc, 165, currentY);
+        currentY += 45;
+    });
+
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#10b981"; ctx.beginPath(); ctx.roundRect(150, 530, 200, 50, 10); ctx.fill();
+    ctx.fillStyle = "#ffffff"; ctx.font = "bold 15px 'Segoe UI'"; ctx.fillText("TIẾP TỤC", canvas.width / 2, 560);
+    ctx.textAlign = "left";
+}
+
+function drawMenuScreen() {
+    ctx.fillStyle = "rgba(10, 15, 30, 0.95)"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#3b82f6"; ctx.font = "bold 42px 'Segoe UI'"; ctx.fillText("HOA QUẢ NỔI LOẠN", canvas.width / 2, 180);
+    ctx.fillStyle = "#a855f7"; ctx.font = "600 16px 'Segoe UI'"; ctx.fillText("BẢN MIỄN PHÍ - DUY ĐÔNG PHÁT TRIỂN", canvas.width / 2, 220);
+    
+    ctx.fillStyle = "#9ca3af"; ctx.font = "13px 'Segoe UI'";
+    ctx.fillText(`Cấu hình: Độ khó [${difficultySettings[difficulty].label}] - Khay [${basketSkins[currentBasketSkin].label}]`, canvas.width / 2, 320);
+
+    ctx.fillStyle = "#10b981"; ctx.beginPath(); ctx.roundRect(150, 450, 200, 50, 10); ctx.fill();
+    ctx.fillStyle = "#ffffff"; ctx.font = "bold 15px 'Segoe UI'"; ctx.fillText("BẮT ĐẦU CHƠI", canvas.width / 2, 480);
+
+    ctx.fillStyle = "#4b5563"; ctx.beginPath(); ctx.roundRect(150, 520, 200, 50, 10); ctx.fill();
+    ctx.fillStyle = "#ffffff"; ctx.fillText("CÀI ĐẶT (S)", canvas.width / 2, 550);
+    ctx.textAlign = "left";
+}
+
+function drawSettingsScreen() {
+    ctx.fillStyle = "rgba(15, 23, 42, 0.98)"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#3b82f6"; ctx.font = "bold 26px 'Segoe UI'"; ctx.fillText("⚙️ BẢNG CÀI ĐẶT FREE", canvas.width / 2, 80);
+    
+    ctx.fillStyle = "#9ca3af"; ctx.font = "bold 14px 'Segoe UI'"; ctx.fillText("1. CHỌN MỨC ĐỘ ĐỘ KHÓ", canvas.width / 2, 150);
+    const diffButtons = [
+        { key: "EASY",   x: 40,  y: 180, w: 120, h: 40, color: "#10b981", txt: "DỄ" },
+        { key: "NORMAL", x: 190, y: 180, w: 120, h: 40, color: "#fbbf24", txt: "VỪA" },
+        { key: "HARD",   x: 340, y: 180, w: 120, h: 40, color: "#ef4444", txt: "KHÓ" }
+    ];
+    diffButtons.forEach(b => {
+        ctx.fillStyle = b.color; ctx.beginPath(); ctx.roundRect(b.x, b.y, b.w, b.h, 6); ctx.fill();
+        if (difficulty === b.key) { ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 3; ctx.stroke(); }
+        ctx.fillStyle = "#0f172a"; ctx.font = "bold 13px 'Segoe UI'"; ctx.fillText(b.txt, b.x + b.w/2, b.y + 25);
+    });
+
+    ctx.fillStyle = "#9ca3af"; ctx.font = "bold 14px 'Segoe UI'"; ctx.fillText("2. ĐỔI NGOẠI HÌNH VẬT DỤNG HỨNG (FREE)", canvas.width / 2, 280);
+    
+    const skins = [
+        { key: "DEFAULT", y: 310, txt: "🪵 Giỏ Gỗ Cổ Điển (Mặc định)" },
+        { key: "NEON",    y: 365, txt: "⚡ Khay Neon Công Nghệ (Phát Sáng)" },
+        { key: "GOLDEN",  y: 420, txt: "👑 Thùng Vàng Hoàng Gia (Chống Chịu)" },
+        { key: "MAGNET",  y: 475, txt: "🧲 Nam Châm Điện Từ (Bề Ngang Rộng)" }
+    ];
+
+    skins.forEach(s => {
+        ctx.fillStyle = currentBasketSkin === s.key ? "rgba(59, 130, 246, 0.3)" : "rgba(255, 255, 255, 0.05)";
+        ctx.strokeStyle = currentBasketSkin === s.key ? "#3b82f6" : "rgba(255,255,255,0.1)";
+        ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.roundRect(40, s.y, 420, 45, 6); ctx.fill(); ctx.stroke();
+        ctx.fillStyle = currentBasketSkin === s.key ? "#3b82f6" : "#ffffff";
+        ctx.font = "14px 'Segoe UI'"; ctx.fillText(s.txt, canvas.width / 2, s.y + 27);
+    });
+
+    ctx.fillStyle = "#374151"; ctx.beginPath(); ctx.roundRect(170, 560, 160, 45, 22); ctx.fill();
+    ctx.fillStyle = "#ffffff"; ctx.font = "bold 13px 'Segoe UI'"; ctx.fillText("LƯU & QUAY LẠI", canvas.width / 2, 588);
+    ctx.textAlign = "left";
+}
+
+// ============================================================================
+// 5. KHỞI CHẠY GAME LOOP
+// ============================================================================
+function mainGameLoop() { update(); draw(); requestAnimationFrame(mainGameLoop); }
+mainGameLoop();
+</script>
+
+</body>
+</html>
