@@ -13,7 +13,6 @@
             min-height: 100vh; overflow: hidden;
         }
         .game-container { position: relative; box-shadow: 0 20px 50px rgba(0,0,0,0.8); border-radius: 16px; overflow: hidden; border: 4px solid #1e293b; }
-        /* ẨN CON TRỎ CHUỘT MẶC ĐỊNH HỆ THỐNG ĐỂ VẼ CON TRỎ CHUỘT RIÊNG TRONG GAME */
         canvas { display: block; background: #111827; cursor: none; }
         .game-guide {
             position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%);
@@ -66,8 +65,18 @@ function playSound(type) {
 
 // Trạng thái cấu hình Game
 let state = "INTRO"; 
-let score = 0; let lives = 3; let maxLives = 5;
+let score = 0; let lives = 5; let maxLives = 5;
 let currentLevel = 1; let combo = 0; let comboTimer = 0;
+
+// ---- HỆ THỐNG BẪY TĂNG DẦN TỪ ẢI 2 (dangerTime càng lớn thì bẫy càng dày) ----
+let dangerTime = 0;              // đếm số khung hình đã ở Ải 2 trở lên trong ván hiện tại
+const TRAP_RAMP_RATE = 0.00035;  // tốc độ tăng độ khó bẫy mỗi khung hình
+const TRAP_RAMP_MAX = 3.0;       // hệ số tăng bẫy tối đa (gấp 3 lần ban đầu)
+
+// ---- HỆ THỐNG KỶ LỤC (lưu trên máy, mở lại trình duyệt vẫn còn) ----
+let highScore = 0;
+try { highScore = parseInt(localStorage.getItem("hoaquanoiloan_highscore")) || 0; } catch (e) { highScore = 0; }
+let brokeRecordThisRun = false; // đã ăn mừng phá kỷ lục trong ván này chưa
 let isReverseControl = false; let reverseTimer = 0;
 let levelUpFlash = 0;
 
@@ -76,8 +85,8 @@ let currentBasketSkin = "DEFAULT";
 
 const difficultySettings = {
     EASY:   { label: "DỄ",      speedMod: 0.75, spawnMod: 0.8,  startLives: 5, bombChanceMod: 0.5 },
-    NORMAL: { label: "TRUNG BÌNH", speedMod: 1.0,  spawnMod: 1.0,  startLives: 3, bombChanceMod: 1.0 },
-    HARD:   { label: "KHÓ",     speedMod: 1.35, spawnMod: 1.3,  startLives: 2, bombChanceMod: 1.7 }
+    NORMAL: { label: "TRUNG BÌNH", speedMod: 1.0,  spawnMod: 1.0,  startLives: 5, bombChanceMod: 1.0 },
+    HARD:   { label: "KHÓ",     speedMod: 1.35, spawnMod: 1.3,  startLives: 5, bombChanceMod: 1.7 }
 };
 
 const basketSkins = {
@@ -89,7 +98,7 @@ const basketSkins = {
 
 const keys = {}; 
 let mouseX = canvas.width / 2; 
-let mouseY = canvas.height / 2; // Lưu trữ thêm tọa độ Y để vẽ chuột tùy chỉnh
+let mouseY = canvas.height / 2;
 let items = []; let particles = []; let backgroundStars = []; let floatingTexts = [];
 
 for (let i = 0; i < 30; i++) {
@@ -108,6 +117,26 @@ const maps = {
 };
 
 const basket = { x: 200, y: 570, width: 90, height: 20, speed: 8 };
+let basketVX = 0;
+let controlMode = "mouse";
+let targetBasketWidth = basket.width;
+let targetBasketHeight = basket.height;
+let basketSizeVX = 0;
+let basketSizeVY = 0;
+const SPRING_STIFFNESS = 0.22;
+const SPRING_DAMPING = 0.74;
+
+function hexToRgb(hex) {
+    const n = parseInt(hex.replace("#", ""), 16);
+    return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+}
+let currentBasketColor = hexToRgb(basketSkins.DEFAULT.color);
+let targetBasketColor = hexToRgb(basketSkins.DEFAULT.color);
+const COLOR_EASE = 0.1;
+const BASKET_ACCEL = 1.1;
+const BASKET_MAX_SPEED = 9.5;
+const BASKET_FRICTION = 0.86;
+const BASKET_MOUSE_EASE = 0.35;
 const itemTypes = {
     APPLE:  { name: "Táo Đỏ",   color: "#ef4444", radius: 10, effect: "score",  val: 1 },
     GOLDEN: { name: "Táo Vàng", color: "#fbbf24", radius: 9,  effect: "score",  val: 3 },
@@ -121,6 +150,7 @@ const itemTypes = {
 // ============================================================================
 window.addEventListener("keydown", function(e) {
     keys[e.code] = true;
+    if (["ArrowLeft", "ArrowRight", "KeyA", "KeyD"].includes(e.code)) controlMode = "keyboard";
     if (e.code === "KeyP" && (state === "PLAYING" || state === "PAUSED")) state = state === "PLAYING" ? "PAUSED" : "PLAYING";
     if (e.code === "KeyS" && (state === "PLAYING" || state === "MENU")) { state = "SETTINGS"; }
     else if (e.code === "KeyS" && state === "SETTINGS") { state = "PLAYING"; }
@@ -130,14 +160,19 @@ window.addEventListener("keyup", function(e) { keys[e.code] = false; });
 
 canvas.addEventListener("mousemove", function(e) {
     const rect = canvas.getBoundingClientRect();
-    mouseX = e.clientX - rect.left;
-    mouseY = e.clientY - rect.top; // Cập nhật tọa độ Y liên tục
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    mouseX = (e.clientX - rect.left) * scaleX;
+    mouseY = (e.clientY - rect.top) * scaleY;
+    controlMode = "mouse";
 });
 
 canvas.addEventListener("click", function(e) {
     const rect = canvas.getBoundingClientRect();
-    const clickX = e.clientX - rect.left;
-    const clickY = e.clientY - rect.top;
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const clickX = (e.clientX - rect.left) * scaleX;
+    const clickY = (e.clientY - rect.top) * scaleY;
 
     if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
 
@@ -146,7 +181,7 @@ canvas.addEventListener("click", function(e) {
             state = "MENU"; playSound("catch");
         }
     }
-    else if (state === "MENU" || state === "GAMEOVER" || state === "VICTORY") {
+    else if (state === "MENU") {
         if (clickX >= 150 && clickX <= 350 && clickY >= 450 && clickY <= 500) {
             resetGameSession();
         }
@@ -154,8 +189,11 @@ canvas.addEventListener("click", function(e) {
             state = "SETTINGS";
         }
     }
+    else if (state === "GAMEOVER" || state === "VICTORY") {
+        resetGameSession();
+    }
     else if (state === "SETTINGS") {
-        if (clickY >= 210 && clickY <= 250) {
+        if (clickY >= 180 && clickY <= 220) {
             if (clickX >= 40 && clickX <= 160) { difficulty = "EASY"; playSound("catch"); }
             if (clickX >= 190 && clickX <= 310) { difficulty = "NORMAL"; playSound("catch"); }
             if (clickX >= 340 && clickX <= 460) { difficulty = "HARD"; playSound("catch"); }
@@ -174,18 +212,33 @@ canvas.addEventListener("click", function(e) {
     }
 });
 
-function applyBasketSkin() {
+function applyBasketSkin(instant) {
     const skin = basketSkins[currentBasketSkin];
-    basket.width = skin.width;
-    basket.height = skin.height;
+    targetBasketWidth = skin.width;
+    targetBasketHeight = skin.height;
+    targetBasketColor = hexToRgb(skin.color);
+    if (instant) {
+        basket.width = skin.width;
+        basket.height = skin.height;
+        basketSizeVX = 0;
+        basketSizeVY = 0;
+        currentBasketColor = { ...targetBasketColor };
+    }
 }
 
 function resetGameSession() {
-    score = 0; currentLevel = 1; combo = 0; comboTimer = 0; isReverseControl = false; levelUpFlash = 0;
+    score = 0; currentLevel = 1; combo = 0; comboTimer = 0;
+    isReverseControl = false; reverseTimer = 0; levelUpFlash = 0;
     items = []; particles = []; floatingTexts = [];
     lives = difficultySettings[difficulty].startLives;
-    maxLives = difficulty === "EASY" ? 6 : 5;
-    applyBasketSkin();
+    maxLives = 5;
+    dangerTime = 0;
+    brokeRecordThisRun = false;
+    applyBasketSkin(true);
+    basket.x = canvas.width / 2 - basket.width / 2;
+    mouseX = basket.x + basket.width / 2;
+    basketVX = 0;
+    controlMode = "mouse";
     state = "PLAYING";
     playSound("levelup");
 }
@@ -196,6 +249,9 @@ function resetGameSession() {
 function triggerLevelUpEffects() {
     levelUpFlash = 45; 
     items = [];
+    isReverseControl = false;
+    reverseTimer = 0;
+    basketVX = 0;
     for (let i = 0; i < 40; i++) {
         particles.push({
             x: Math.random() * canvas.width, y: Math.random() * (canvas.height - 200),
@@ -207,21 +263,26 @@ function triggerLevelUpEffects() {
     playSound("levelup");
 }
 
-function spawnItem() {
+function spawnItem(trapRampMultiplier) {
+    trapRampMultiplier = trapRampMultiplier || 1;
     const levelConfig = maps[currentLevel];
     const diff = difficultySettings[difficulty];
     let randomIndex = Math.floor(Math.random() * levelConfig.pool.length);
     let chosenTypeKey = levelConfig.pool[randomIndex];
-    
-    if (chosenTypeKey !== "BOMB" && Math.random() < (diff.bombChanceMod - 1) * 0.25) {
+
+    if (chosenTypeKey !== "BOMB" && Math.random() < (diff.bombChanceMod - 1) * 0.25 * trapRampMultiplier) {
         if (levelConfig.pool.includes("BOMB")) chosenTypeKey = "BOMB";
+    }
+    if (chosenTypeKey !== "BOMB" && chosenTypeKey !== "POISON" && levelConfig.pool.includes("POISON")) {
+        if (Math.random() < (trapRampMultiplier - 1) * 0.18) chosenTypeKey = "POISON";
     }
 
     const proto = itemTypes[chosenTypeKey];
+    const speedRamp = 1 + (Math.min(trapRampMultiplier, TRAP_RAMP_MAX) - 1) * 0.15;
     items.push({
         x: Math.random() * (canvas.width - 40) + 20, y: -30,
         color: proto.color, radius: proto.radius, effect: proto.effect, val: proto.val,
-        speed: (Math.random() * 1.5 + levelConfig.baseSpeed) * diff.speedMod, pulse: 0
+        speed: (Math.random() * 1.5 + levelConfig.baseSpeed) * diff.speedMod * speedRamp, pulse: 0
     });
 }
 
@@ -246,6 +307,26 @@ function update() {
 
     if (levelUpFlash > 0) levelUpFlash--;
 
+    {
+        const dw = targetBasketWidth - basket.width;
+        const dh = targetBasketHeight - basket.height;
+        if (Math.abs(dw) > 0.05 || Math.abs(dh) > 0.05 || Math.abs(basketSizeVX) > 0.05 || Math.abs(basketSizeVY) > 0.05) {
+            const centerX = basket.x + basket.width / 2;
+            basketSizeVX = (basketSizeVX + dw * SPRING_STIFFNESS) * SPRING_DAMPING;
+            basketSizeVY = (basketSizeVY + dh * SPRING_STIFFNESS) * SPRING_DAMPING;
+            basket.width += basketSizeVX;
+            basket.height += basketSizeVY;
+            if (basket.width < 20) basket.width = 20;
+            if (basket.height < 10) basket.height = 10;
+            basket.x = centerX - basket.width / 2;
+            if (basket.x < 0) basket.x = 0;
+            if (basket.x > canvas.width - basket.width) basket.x = canvas.width - basket.width;
+        }
+        currentBasketColor.r += (targetBasketColor.r - currentBasketColor.r) * COLOR_EASE;
+        currentBasketColor.g += (targetBasketColor.g - currentBasketColor.g) * COLOR_EASE;
+        currentBasketColor.b += (targetBasketColor.b - currentBasketColor.b) * COLOR_EASE;
+    }
+
     if (state !== "PLAYING") return;
 
     if (isReverseControl) { reverseTimer--; if (reverseTimer <= 0) isReverseControl = false; }
@@ -254,20 +335,37 @@ function update() {
     let moveDir = 0;
     if (keys["ArrowLeft"] || keys["KeyA"]) moveDir = -1;
     if (keys["ArrowRight"] || keys["KeyD"]) moveDir = 1;
+    if (isReverseControl) moveDir *= -1;
 
-    if (moveDir === 0) {
+    if (moveDir !== 0) {
+        basketVX += moveDir * BASKET_ACCEL;
+        if (basketVX > BASKET_MAX_SPEED) basketVX = BASKET_MAX_SPEED;
+        if (basketVX < -BASKET_MAX_SPEED) basketVX = -BASKET_MAX_SPEED;
+        basket.x += basketVX;
+    } else if (controlMode === "keyboard") {
+        if (Math.abs(basketVX) > 0.05) {
+            basketVX *= BASKET_FRICTION;
+            basket.x += basketVX;
+        } else {
+            basketVX = 0;
+        }
+    } else {
+        basketVX = 0;
         let targetX = mouseX - basket.width / 2;
         if (isReverseControl) targetX = (canvas.width - mouseX) - basket.width / 2;
-        basket.x += (targetX - basket.x) * 0.25;
-    } else {
-        if (isReverseControl) moveDir *= -1;
-        basket.x += moveDir * basket.speed;
+        basket.x += (targetX - basket.x) * BASKET_MOUSE_EASE;
     }
 
     if (basket.x < 0) basket.x = 0;
     if (basket.x > canvas.width - basket.width) basket.x = canvas.width - basket.width;
 
-    if (Math.random() < maps[currentLevel].spawnRate * difficultySettings[difficulty].spawnMod) spawnItem();
+    let trapRampMultiplier = 1;
+    if (currentLevel >= 2) {
+        dangerTime++;
+        trapRampMultiplier = Math.min(1 + dangerTime * TRAP_RAMP_RATE, TRAP_RAMP_MAX);
+    }
+
+    if (Math.random() < maps[currentLevel].spawnRate * difficultySettings[difficulty].spawnMod * Math.min(trapRampMultiplier, 1.5)) spawnItem(trapRampMultiplier);
 
     for (let i = items.length - 1; i >= 0; i--) {
         let item = items[i]; item.y += item.speed; item.pulse += 0.08;
@@ -283,11 +381,28 @@ function update() {
                 if (combo >= 12) bonus *= 3; else if (combo >= 5) bonus *= 2;
                 score += bonus; addFloatingText(item.x, basket.y - 10, `+${bonus} Điểm ${combo > 5 ? 'Combo!' : ''}`, item.color);
                 playSound("catch");
+
+                if (score > highScore) {
+                    if (!brokeRecordThisRun) {
+                        brokeRecordThisRun = true;
+                        addFloatingText(canvas.width / 2, 100, "🏆 KỶ LỤC MỚI!", "#fbbf24");
+                        for (let k = 0; k < 25; k++) {
+                            particles.push({
+                                x: canvas.width / 2, y: 90,
+                                vx: (Math.random() - 0.5) * 10, vy: (Math.random() - 0.5) * 10 - 2,
+                                radius: Math.random() * 3 + 2, color: "#fbbf24", alpha: 1, decay: 0.02
+                            });
+                        }
+                        playSound("levelup");
+                    }
+                    highScore = score;
+                    try { localStorage.setItem("hoaquanoiloan_highscore", String(highScore)); } catch (e) {}
+                }
             } else if (item.effect === "bomb") {
                 lives--; combo = 0; addFloatingText(item.x, basket.y - 10, "-1 Mạng (Bom)", "#ef4444"); playSound("bomb");
                 if (lives <= 0) state = "GAMEOVER";
             } else if (item.effect === "poison") {
-                isReverseControl = true; reverseTimer = 200;
+                isReverseControl = true; reverseTimer = 120;
                 addFloatingText(item.x, basket.y - 10, "Đảo Hướng Điều Khiển!", "#a855f7"); playSound("bomb");
             } else if (item.effect === "heart") {
                 if (lives < maxLives) { lives++; addFloatingText(item.x, basket.y - 10, "+1 Tim", "#ec4899"); playSound("levelup"); }
@@ -298,6 +413,7 @@ function update() {
                 if (maps[currentLevel + 1]) { 
                     currentLevel++; 
                     triggerLevelUpEffects();
+                    break;
                 } else state = "VICTORY";
             }
             continue;
@@ -324,7 +440,6 @@ function update() {
 // 4. HỆ THỐNG ĐỒ HỌA GIAO DIỆN (DRAW)
 // ============================================================================
 function drawCustomMouse() {
-    // Hàm tự vẽ một con trỏ chuột tùy chỉnh đẹp mắt hình mũi tên neon phát sáng
     ctx.save();
     ctx.translate(mouseX, mouseY);
     ctx.shadowBlur = 8;
@@ -366,10 +481,10 @@ function draw() {
         ctx.restore();
     }
 
-    // Vẽ thiết bị hứng
     const activeSkin = basketSkins[currentBasketSkin];
-    ctx.save(); ctx.fillStyle = activeSkin.color;
-    if (activeSkin.style === "neon") { ctx.shadowBlur = 15; ctx.shadowColor = activeSkin.color; }
+    const liveColor = `rgb(${currentBasketColor.r | 0}, ${currentBasketColor.g | 0}, ${currentBasketColor.b | 0})`;
+    ctx.save(); ctx.fillStyle = liveColor;
+    if (activeSkin.style === "neon") { ctx.shadowBlur = 15; ctx.shadowColor = liveColor; }
     ctx.beginPath(); ctx.roundRect(basket.x, basket.y, basket.width, basket.height, 6); ctx.fill();
     ctx.fillStyle = "rgba(255,255,255,0.3)";
     if (activeSkin.style === "wood") ctx.fillRect(basket.x + 10, basket.y + 4, basket.width - 20, 3);
@@ -377,7 +492,6 @@ function draw() {
     if (activeSkin.style === "magnet") { ctx.fillStyle = "#ffffff"; ctx.fillRect(basket.x, basket.y, 8, basket.height); ctx.fillRect(basket.x + basket.width - 8, basket.y, 8, basket.height); }
     ctx.restore();
 
-    // Vẽ vật phẩm trái cây
     items.forEach(item => {
         ctx.save(); let scale = 1 + Math.sin(item.pulse) * 0.05;
         ctx.translate(item.x, item.y); ctx.scale(scale, scale);
@@ -395,15 +509,14 @@ function draw() {
         ctx.font = "bold 14px 'Segoe UI'"; ctx.textAlign = "center"; ctx.fillText(ft.text, ft.x, ft.y); ctx.restore();
     });
 
-    // THANH TRẠNG THÁI HUD
     ctx.fillStyle = "rgba(15, 23, 42, 0.6)"; ctx.fillRect(0, 0, canvas.width, 60);
     ctx.fillStyle = "#ffffff"; ctx.font = "bold 13px 'Segoe UI'"; ctx.fillText(currentMap.name, 15, 23);
     ctx.fillStyle = "#9ca3af"; ctx.font = "11px 'Segoe UI'"; ctx.fillText(`Mức độ: ${difficultySettings[difficulty].label} | Dụng cụ: ${activeSkin.label}`, 15, 43);
 
     ctx.fillStyle = "#fbbf24"; ctx.font = "bold 16px 'Segoe UI'"; ctx.textAlign = "right"; 
     ctx.fillText(`⭐ ${score} / ${currentMap.targetScore}`, canvas.width - 15, 25);
-    ctx.fillStyle = "#6be6a8"; ctx.font = "11px 'Segoe UI'";
-    ctx.fillText(`Mục tiêu qua ải: ${currentMap.targetScore}đ`, canvas.width - 15, 45);
+    ctx.fillStyle = score >= highScore ? "#fbbf24" : "#6be6a8"; ctx.font = "11px 'Segoe UI'";
+    ctx.fillText(score >= highScore ? `🏆 Kỷ lục: ${highScore}` : `Kỷ lục: ${highScore}`, canvas.width - 15, 45);
     ctx.textAlign = "left";
 
     ctx.fillStyle = "#9ca3af"; ctx.font = "12px 'Segoe UI'"; ctx.fillText("Mạng: ", 195, 35);
@@ -421,10 +534,9 @@ function draw() {
     else if (state === "MENU") drawMenuScreen();
     else if (state === "SETTINGS") drawSettingsScreen();
     else if (state === "PAUSED") drawOverlay("ĐANG TẠM DỪNG", "Trò chơi đóng băng", "Nhấn phím 'P' để tiếp tục chơi", "#6b7280");
-    else if (state === "GAMEOVER") drawOverlay("THẤT BẠI RỒI", "Bạn đã hết mạng sống", "Nhấn vào nút Cài Đặt hoặc click để thử lại", "#ef4444");
-    else if (state === "VICTORY") drawOverlay("CHIẾN THẮNG TUYỆT ĐỐI", "Bạn đã hoàn thành mọi thử thách!", "Click chuột để quay lại từ đầu", "#10b981");
+    else if (state === "GAMEOVER") drawOverlay("THẤT BẠI RỒI", brokeRecordThisRun ? `🏆 Kỷ lục mới: ${highScore} điểm!` : `Điểm: ${score}  |  Kỷ lục: ${highScore}`, "👆 Click vào bất kỳ đâu để chơi lại ngay", "#ef4444");
+    else if (state === "VICTORY") drawOverlay("CHIẾN THẮNG TUYỆT ĐỐI", brokeRecordThisRun ? `🏆 Kỷ lục mới: ${highScore} điểm!` : `Điểm: ${score}  |  Kỷ lục: ${highScore}`, "👆 Click vào bất kỳ đâu để chơi lại từ đầu", "#10b981");
 
-    // LUÔN VẼ CON TRỎ CHUỘT TÙY CHỈNH LÊN TRÊN CÙNG
     drawCustomMouse();
 }
 
@@ -471,7 +583,9 @@ function drawMenuScreen() {
     ctx.textAlign = "center";
     ctx.fillStyle = "#3b82f6"; ctx.font = "bold 42px 'Segoe UI'"; ctx.fillText("HOA QUẢ NỔI LOẠN", canvas.width / 2, 180);
     ctx.fillStyle = "#a855f7"; ctx.font = "600 16px 'Segoe UI'"; ctx.fillText("BẢN MIỄN PHÍ - DUY ĐÔNG PHÁT TRIỂN", canvas.width / 2, 220);
-    
+
+    ctx.fillStyle = "#fbbf24"; ctx.font = "bold 22px 'Segoe UI'"; ctx.fillText(`🏆 KỶ LỤC: ${highScore} điểm`, canvas.width / 2, 270);
+
     ctx.fillStyle = "#9ca3af"; ctx.font = "13px 'Segoe UI'";
     ctx.fillText(`Cấu hình: Độ khó [${difficultySettings[difficulty].label}] - Khay [${basketSkins[currentBasketSkin].label}]`, canvas.width / 2, 320);
 
@@ -501,7 +615,21 @@ function drawSettingsScreen() {
     });
 
     ctx.fillStyle = "#9ca3af"; ctx.font = "bold 14px 'Segoe UI'"; ctx.fillText("2. ĐỔI NGOẠI HÌNH VẬT DỤNG HỨNG (FREE)", canvas.width / 2, 280);
-    
+
+    ctx.fillStyle = "#6b7280"; ctx.font = "11px 'Segoe UI'"; ctx.fillText("Xem trước", canvas.width / 2, 240);
+    ctx.save();
+    const previewColor = `rgb(${currentBasketColor.r | 0}, ${currentBasketColor.g | 0}, ${currentBasketColor.b | 0})`;
+    ctx.fillStyle = previewColor;
+    if (basketSkins[currentBasketSkin].style === "neon") { ctx.shadowBlur = 15; ctx.shadowColor = previewColor; }
+    const pvX = canvas.width / 2 - basket.width / 2, pvY = 252;
+    ctx.beginPath(); ctx.roundRect(pvX, pvY, basket.width, basket.height, 6); ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,0.3)";
+    const st = basketSkins[currentBasketSkin].style;
+    if (st === "wood") ctx.fillRect(pvX + 10, pvY + 4, basket.width - 20, 3);
+    if (st === "gold") ctx.fillRect(pvX + 4, pvY + 2, basket.width - 8, basket.height - 4);
+    if (st === "magnet") { ctx.fillStyle = "#ffffff"; ctx.fillRect(pvX, pvY, 8, basket.height); ctx.fillRect(pvX + basket.width - 8, pvY, 8, basket.height); }
+    ctx.restore();
+
     const skins = [
         { key: "DEFAULT", y: 310, txt: "🪵 Giỏ Gỗ Cổ Điển (Mặc định)" },
         { key: "NEON",    y: 365, txt: "⚡ Khay Neon Công Nghệ (Phát Sáng)" },
@@ -526,7 +654,15 @@ function drawSettingsScreen() {
 // ============================================================================
 // 5. KHỞI CHẠY GAME LOOP
 // ============================================================================
-function mainGameLoop() { update(); draw(); requestAnimationFrame(mainGameLoop); }
+function mainGameLoop() {
+    try {
+        update();
+        draw();
+    } catch (err) {
+        console.error("Lỗi trong vòng lặp game (đã được chặn để tránh đứng màn hình):", err);
+    }
+    requestAnimationFrame(mainGameLoop);
+}
 mainGameLoop();
 </script>
 
